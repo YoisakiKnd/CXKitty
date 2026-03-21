@@ -35,11 +35,10 @@ jobs:
       - name: Resolve PyInstaller data files
         shell: bash
         run: |
-          python <<'PY' >> "$GITHUB_ENV"
+          uv run python <<'PY' >> "$GITHUB_ENV"
           import importlib.util
           import pathlib
           import platform
-          import sys
 
           def site_root(module_name: str) -> pathlib.Path:
               spec = importlib.util.find_spec(module_name)
