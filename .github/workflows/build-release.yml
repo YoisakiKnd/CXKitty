@@ -97,16 +97,20 @@ jobs:
           cp -r dist/CxKitty release/CxKitty
           cp config.yml pyproject.toml release/CxKitty/
 
-      - name: Create zip archive
+      - name: Create release zip
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
-          Compress-Archive -Path release/CxKitty/* -DestinationPath release/CxKitty-windows-x64.zip -Force
+          if (Test-Path release/CxKitty-windows-x64.zip) {
+            Remove-Item release/CxKitty-windows-x64.zip -Force
+          }
+          tar.exe -a -c -f release/CxKitty-windows-x64.zip -C release CxKitty
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: CxKitty-windows-x64
-          path: release/CxKitty-windows-x64.zip
+          path: release/CxKitty
 
       - name: Upload release asset
         if: github.event_name == 'release'
