@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/SocialSisterYi/CxKitty"
+Repository = "https://github.com/YoisakiKnd/CXKitty"
 
 [dependency-groups]
 dev = [
