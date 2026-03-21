@@ -1,0 +1,116 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: "x64"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Resolve PyInstaller data files
+        shell: bash
+        run: |
+          python <<'PY' >> "$GITHUB_ENV"
+          import importlib.util
+          import pathlib
+          import platform
+          import sys
+
+          def site_root(module_name: str) -> pathlib.Path:
+              spec = importlib.util.find_spec(module_name)
+              if spec is None or spec.origin is None:
+                  raise RuntimeError(f"module not found: {module_name}")
+              return pathlib.Path(spec.origin).resolve().parent
+
+          def add_data(path: pathlib.Path, target: str) -> str:
+              sep = ";" if platform.system() == "Windows" else ":"
+              return f"--add-data={path}{sep}{target}"
+
+          ddddocr_root = site_root("ddddocr")
+          data_args = []
+          for name in ("common.onnx", "common_det.onnx", "common_old.onnx"):
+              candidate = ddddocr_root / name
+              if candidate.exists():
+                  data_args.append(add_data(candidate, "ddddocr"))
+
+          onnxruntime_root = site_root("onnxruntime")
+          capi_root = onnxruntime_root / "capi"
+          for name in (
+              "onnxruntime_providers_shared.dll",
+              "libonnxruntime_providers_shared.so",
+              "libonnxruntime_providers_shared.dylib",
+          ):
+              candidate = capi_root / name
+              if candidate.exists():
+                  data_args.append(add_data(candidate, "onnxruntime/capi"))
+
+          print("PYINSTALLER_DATA_ARGS<<EOF")
+          print(" ".join(data_args))
+          print("EOF")
+          PY
+
+      - name: Build executable bundle
+        shell: bash
+        run: |
+          uv run pyinstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --name CxKitty \
+            --collect-all nicegui \
+            --collect-all fastapi \
+            --collect-all starlette \
+            --collect-all uvicorn \
+            --collect-all qrcode \
+            --collect-all ddddocr \
+            $PYINSTALLER_DATA_ARGS \
+            app.py
+
+      - name: Stage bundle
+        shell: bash
+        run: |
+          mkdir -p release
+          cp -r dist/CxKitty release/CxKitty
+          cp config.yml pyproject.toml release/CxKitty/
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path release/CxKitty/* -DestinationPath release/CxKitty-windows-x64.zip -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CxKitty-windows-x64
+          path: release/CxKitty-windows-x64.zip
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/CxKitty-windows-x64.zip

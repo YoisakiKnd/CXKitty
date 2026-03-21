@@ -1,8 +1,19 @@
 import logging
+import threading
+from typing import Callable, Optional
 
 import config
 
 log_file_name = ""
+_web_log_ctx = threading.local()
+
+
+def set_web_log_hook(hook: Optional[Callable[[str], None]]) -> None:
+    _web_log_ctx.hook = hook
+
+
+def get_web_log_hook() -> Optional[Callable[[str], None]]:
+    return getattr(_web_log_ctx, "hook", None)
 
 def set_log_filename(phone: str):
     """设置日志文件名
@@ -44,6 +55,24 @@ class Logger:
             fh.setFormatter(logging.Formatter(self.fmt))
             self.logger.addHandler(fh)
 
+    def _emit_web_log(self, level: int, msg, exc_info=False) -> None:
+        hook = get_web_log_hook()
+        if hook is None:
+            return
+        record = self.logger.makeRecord(
+            self.logger.name,
+            level,
+            fn="",
+            lno=0,
+            msg=msg,
+            args=(),
+            exc_info=None,
+        )
+        formatted = logging.Formatter(self.fmt).format(record)
+        hook(formatted)
+        if exc_info:
+            hook("附带异常堆栈，请查看本地日志文件获取完整信息。")
+
     def debug(self, msg) -> None:
         """输出 debug 级别日志
         Args:
@@ -51,6 +80,7 @@ class Logger:
         """
         self.load_handler()
         self.logger.debug(msg)
+        self._emit_web_log(logging.DEBUG, msg)
 
     def info(self, msg) -> None:
         """输出 info 级别日志
@@ -59,6 +89,7 @@ class Logger:
         """
         self.load_handler()
         self.logger.info(msg)
+        self._emit_web_log(logging.INFO, msg)
 
     def warning(self, msg) -> None:
         """输出 warning 级别日志
@@ -67,6 +98,7 @@ class Logger:
         """
         self.load_handler()
         self.logger.warning(msg)
+        self._emit_web_log(logging.WARNING, msg)
 
     def error(self, msg, exc_info=False) -> None:
         """输出 error 级别日志
@@ -76,5 +108,6 @@ class Logger:
         """
         self.load_handler()
         self.logger.error(msg, exc_info=exc_info)
+        self._emit_web_log(logging.ERROR, msg, exc_info=exc_info)
 
-__all__ = ["set_log_filename", "Logger"]
+__all__ = ["set_log_filename", "set_web_log_hook", "get_web_log_hook", "Logger"]
