@@ -10,6 +10,10 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::login,
+            commands::list_saved_sessions,
+            commands::use_saved_session,
+            commands::start_qr_login,
+            commands::poll_qr_login,
             commands::list_courses,
             commands::list_homework,
             commands::list_exams,

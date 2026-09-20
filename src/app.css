@@ -132,28 +132,3 @@
 #app {
 	@apply mx-auto max-w-[1100px] p-4 md:p-6;
 }
-
-/* Strong status badge colors (homework / brush points) */
-.badge-undone {
-	@apply border-transparent bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300;
-}
-.badge-done {
-	@apply border-transparent bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300;
-}
-.badge-running {
-	@apply border-transparent bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300;
-}
-.badge-skipped {
-	@apply border-transparent bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300;
-}
-.badge-error,
-.badge-expired {
-	@apply border-transparent bg-rose-100 text-rose-900 dark:bg-rose-950 dark:text-rose-300;
-}
-.badge-other {
-	@apply border-transparent bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300;
-}
-
-.brush-log {
-	@apply rounded-md bg-zinc-950 p-3 font-mono text-[0.75rem] leading-relaxed text-zinc-100 whitespace-pre-wrap break-all;
-}

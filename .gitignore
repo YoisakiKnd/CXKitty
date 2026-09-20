@@ -13,3 +13,6 @@ src-tauri/gen/schemas/
 .idea/
 .vscode/
 *.swp
+
+# Bundled CodeGraph indexer cache (generated, not source)
+.codegraph/

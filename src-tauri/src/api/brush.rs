@@ -18,6 +18,14 @@ pub struct BrushOptions {
     pub video_report_rate: i64,
     /// Only process chapters that are not fully finished (default true).
     pub unfinished_only: bool,
+    /// Cooldown after each completed task point, in seconds. Matches the
+    /// original `config.yml` `video.wait` / `document.wait` / `work.wait` (15).
+    #[serde(default = "default_wait_seconds")]
+    pub wait_seconds: i64,
+}
+
+fn default_wait_seconds() -> i64 {
+    15
 }
 
 impl Default for BrushOptions {
@@ -26,14 +34,16 @@ impl Default for BrushOptions {
             video_speed: 1.0,
             video_report_rate: 58,
             unfinished_only: true,
+            wait_seconds: default_wait_seconds(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrushProgressEvent {
-    pub kind: String, // log | point | chapter | done | error | stopped
+    /// log | course | chapter | point | wait | done | error | stopped
+    pub kind: String,
     pub message: String,
     pub chapter_label: Option<String>,
     pub point_title: Option<String>,
@@ -45,6 +55,13 @@ pub struct BrushProgressEvent {
     pub chapter_total: Option<usize>,
     pub point_index: Option<usize>,
     pub point_total: Option<usize>,
+    /// Current course being processed (multi-course runs).
+    pub current_course: Option<String>,
+    pub course_index: Option<usize>,
+    pub course_total: Option<usize>,
+    /// Cooldown countdown, mirroring `WebTask.wait_progress`.
+    pub wait_progress: Option<f64>,
+    pub wait_progress_text: Option<String>,
 }
 
 fn emit(app: &AppHandle, ev: BrushProgressEvent) {
@@ -65,8 +82,7 @@ fn log_ev(app: &AppHandle, message: impl Into<String>) {
             duration: None,
             chapter_index: None,
             chapter_total: None,
-            point_index: None,
-            point_total: None,
+            ..Default::default()
         },
     );
 }
@@ -92,17 +108,120 @@ impl BrushRunner {
         self.stop.load(Ordering::SeqCst)
     }
 
+    /// Cooldown between task points, mirroring the original
+    /// `WebTaskRunner.wait(seconds, message)`: log the message, then tick a
+    /// 1-second countdown that drives the 冷却等待 progress bar. Stops early if
+    /// the user cancels.
+    async fn wait_cooldown(&self, app: &AppHandle, seconds: i64, reason: &str) {
+        if seconds <= 0 {
+            return;
+        }
+        log_ev(app, format!("{reason}，等待 {seconds}s"));
+        for elapsed in 0..=seconds {
+            if self.stopped() {
+                break;
+            }
+            let ratio = (elapsed as f64 / seconds as f64).min(1.0);
+            emit(
+                app,
+                BrushProgressEvent {
+                    kind: "wait".into(),
+                    message: format!("等待冷却 {elapsed}/{seconds}s"),
+                    wait_progress: Some(ratio),
+                    wait_progress_text: Some(format!("等待冷却 {elapsed}/{seconds}s")),
+                    ..Default::default()
+                },
+            );
+            if elapsed < seconds {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        // Clear the bar once the cooldown ends.
+        emit(
+            app,
+            BrushProgressEvent {
+                kind: "wait".into(),
+                message: String::new(),
+                wait_progress: Some(0.0),
+                wait_progress_text: Some("-".into()),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Run every selected course sequentially (original `ClassSelector` command
+    /// semantics: a comma-joined list of course indices).
     pub async fn run(
         &self,
         app: AppHandle,
         client: ChaoxingClient,
-        course: CourseInfo,
+        courses: Vec<CourseInfo>,
         puid: i64,
         opts: BrushOptions,
     ) -> Result<()> {
         self.stop.store(false, Ordering::SeqCst);
-        log_ev(
+        let course_total = courses.len();
+        log_ev(&app, format!("开始刷课：共 {course_total} 门课程"));
+
+        for (idx, course) in courses.iter().enumerate() {
+            if self.stopped() {
+                emit(
+                    &app,
+                    BrushProgressEvent {
+                        kind: "stopped".into(),
+                        message: "用户停止刷课".into(),
+                        current_course: Some(course.name.clone()),
+                        ..Default::default()
+                    },
+                );
+                return Ok(());
+            }
+
+            emit(
+                &app,
+                BrushProgressEvent {
+                    kind: "course".into(),
+                    message: format!("开始处理课程：{} ({}/{})", course.name, idx + 1, course_total),
+                    current_course: Some(course.name.clone()),
+                    course_index: Some(idx + 1),
+                    course_total: Some(course_total),
+                    ..Default::default()
+                },
+            );
+
+            if let Err(e) = self
+                .run_course(&app, &client, course, puid, &opts, idx + 1, course_total)
+                .await
+            {
+                log_ev(&app, format!("课程处理失败 {}: {e}", course.name));
+            }
+        }
+
+        emit(
             &app,
+            BrushProgressEvent {
+                kind: "done".into(),
+                message: format!("刷课结束：共 {course_total} 门课程"),
+                course_total: Some(course_total),
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    /// Process one course: walk its chapters and task points.
+    async fn run_course(
+        &self,
+        app: &AppHandle,
+        client: &ChaoxingClient,
+        course: &CourseInfo,
+        puid: i64,
+        opts: &BrushOptions,
+        course_index: usize,
+        course_total: usize,
+    ) -> Result<()> {
+        log_ev(
+            app,
             format!(
                 "开始刷课：{} (course={}, class={})",
                 course.name, course.course_id, course.class_id
@@ -113,12 +232,12 @@ impl BrushRunner {
             .list_chapters(course.key, course.cpi, course.course_id, course.class_id, puid)
             .await?;
         let chapter_total = chapters.len();
-        log_ev(&app, format!("共 {chapter_total} 个章节节点"));
+        log_ev(app, format!("共 {chapter_total} 个章节节点"));
 
         for (ci, chapter) in chapters.iter().enumerate() {
             if self.stopped() {
                 emit(
-                    &app,
+                    app,
                     BrushProgressEvent {
                         kind: "stopped".into(),
                         message: "用户停止刷课".into(),
@@ -130,8 +249,10 @@ impl BrushRunner {
                         duration: None,
                         chapter_index: Some(ci + 1),
                         chapter_total: Some(chapter_total),
-                        point_index: None,
-                        point_total: None,
+                        current_course: Some(course.name.clone()),
+                        course_index: Some(course_index),
+                        course_total: Some(course_total),
+                        ..Default::default()
                     },
                 );
                 return Ok(());
@@ -139,7 +260,7 @@ impl BrushRunner {
 
             let label = format!("{} {}", chapter.label, chapter.name);
             emit(
-                &app,
+                app,
                 BrushProgressEvent {
                     kind: "chapter".into(),
                     message: format!(
@@ -154,13 +275,15 @@ impl BrushRunner {
                     duration: None,
                     chapter_index: Some(ci + 1),
                     chapter_total: Some(chapter_total),
-                    point_index: None,
-                    point_total: None,
+                    current_course: Some(course.name.clone()),
+                    course_index: Some(course_index),
+                    course_total: Some(course_total),
+                    ..Default::default()
                 },
             );
 
             if opts.unfinished_only && is_chapter_finished(chapter) {
-                log_ev(&app, format!("已完成，跳过：{label}"));
+                log_ev(app, format!("已完成，跳过：{label}"));
                 continue;
             }
 
@@ -172,7 +295,7 @@ impl BrushRunner {
             let points = match client.list_task_points(course.course_id, chapter).await {
                 Ok(p) => p,
                 Err(e) => {
-                    log_ev(&app, format!("拉取任务点失败 {label}: {e}"));
+                    log_ev(app, format!("拉取任务点失败 {label}: {e}"));
                     continue;
                 }
             };
@@ -187,7 +310,7 @@ impl BrushRunner {
             for (pi, point) in points.iter().enumerate() {
                 if self.stopped() {
                     emit(
-                        &app,
+                        app,
                         BrushProgressEvent {
                             kind: "stopped".into(),
                             message: "用户停止刷课".into(),
@@ -201,13 +324,14 @@ impl BrushRunner {
                             chapter_total: Some(chapter_total),
                             point_index: Some(pi + 1),
                             point_total: Some(point_total),
+                            ..Default::default()
                         },
                     );
                     return Ok(());
                 }
 
                 emit(
-                    &app,
+                    app,
                     BrushProgressEvent {
                         kind: "point".into(),
                         message: format!("处理 {}「{}」", point.kind, point.title),
@@ -221,6 +345,7 @@ impl BrushRunner {
                         chapter_total: Some(chapter_total),
                         point_index: Some(pi + 1),
                         point_total: Some(point_total),
+                        ..Default::default()
                     },
                 );
 
@@ -232,10 +357,11 @@ impl BrushRunner {
                     card_index: point.card_index,
                 };
 
+                let mut completed = false;
                 match self
                     .run_one(
-                        &app,
-                        &client,
+                        app,
+                        client,
                         &ctx,
                         point,
                         puid,
@@ -249,8 +375,9 @@ impl BrushRunner {
                     .await
                 {
                     Ok((msg, status)) => {
+                        completed = status == "done";
                         emit(
-                            &app,
+                            app,
                             BrushProgressEvent {
                                 kind: "point".into(),
                                 message: msg,
@@ -264,6 +391,7 @@ impl BrushRunner {
                                 chapter_total: Some(chapter_total),
                                 point_index: Some(pi + 1),
                                 point_total: Some(point_total),
+                                ..Default::default()
                             },
                         );
                     }
@@ -271,7 +399,7 @@ impl BrushRunner {
                         let msg = e.to_string();
                         if msg.contains("已停止") {
                             emit(
-                                &app,
+                                app,
                                 BrushProgressEvent {
                                     kind: "stopped".into(),
                                     message: msg,
@@ -285,12 +413,13 @@ impl BrushRunner {
                                     chapter_total: Some(chapter_total),
                                     point_index: Some(pi + 1),
                                     point_total: Some(point_total),
+                                    ..Default::default()
                                 },
                             );
                             return Ok(());
                         }
                         emit(
-                            &app,
+                            app,
                             BrushProgressEvent {
                                 kind: "point".into(),
                                 message: format!("失败：{msg}"),
@@ -304,9 +433,16 @@ impl BrushRunner {
                                 chapter_total: Some(chapter_total),
                                 point_index: Some(pi + 1),
                                 point_total: Some(point_total),
+                                ..Default::default()
                             },
                         );
                     }
+                }
+
+                // Cooldown after a completed point, mirroring the original
+                // `WebTaskRunner.wait(config.*_WAIT, "…已完成，等待 Ns")`.
+                if completed {
+                    self.wait_cooldown(app, opts.wait_seconds, "任务点已完成").await;
                 }
 
                 // Small gap between points
@@ -314,23 +450,7 @@ impl BrushRunner {
             }
         }
 
-        emit(
-            &app,
-            BrushProgressEvent {
-                kind: "done".into(),
-                message: format!("刷课结束：{}", course.name),
-                chapter_label: None,
-                point_title: None,
-                point_kind: None,
-                point_status: None,
-                playing: None,
-                duration: None,
-                chapter_index: Some(chapter_total),
-                chapter_total: Some(chapter_total),
-                point_index: None,
-                point_total: None,
-            },
-        );
+        log_ev(app, format!("课程完成：{}", course.name));
         Ok(())
     }
 
@@ -405,8 +525,7 @@ impl BrushRunner {
                                     duration: Some(duration),
                                     chapter_index: None,
                                     chapter_total: None,
-                                    point_index: None,
-                                    point_total: None,
+                                    ..Default::default()
                                 },
                             );
                         },

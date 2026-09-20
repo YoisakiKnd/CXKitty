@@ -5,6 +5,8 @@ pub mod courses;
 pub mod exams;
 pub mod homework;
 pub mod login;
+pub mod qr;
+pub mod sessions;
 pub mod task_point;
 
 pub use brush::{BrushOptions, BrushRunner};
@@ -14,3 +16,5 @@ pub use courses::CourseInfo;
 pub use exams::ExamItem;
 pub use homework::HomeworkItem;
 pub use login::AccountInfo;
+pub use qr::{QrPollResult, QrSession, QrStartResult};
+pub use sessions::SavedSession;
